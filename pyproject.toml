@@ -1,0 +1,7 @@
+[project]
+name = "fairy-r1-wrapper"
+version = "0.1.0"
+description = "Fairy R1模型API包装器"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = ["fastapi>=0.116.1", "pydantic>=2.11.7"]
