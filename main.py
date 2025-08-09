@@ -1,5 +1,6 @@
+import copy
 import json
-from typing import AsyncGenerator, Optional
+from typing import Optional
 
 import httpx
 import uvicorn
@@ -35,13 +36,13 @@ class Args(BaseModel):
         parser.add_argument(
             "--port",
             type=int,
-            default=8080,
+            default=1075,
             help="Port to listen on",
         )
         parser.add_argument(
             "--remote-endpoint",
             type=str,
-            default="http://localhost:1025",
+            default="http://localhost:1025/v1",
             help="Remote endpoint URL",
         )
         parser.add_argument(
@@ -72,71 +73,53 @@ class ChatCompletionRequest(BaseModel):
 
 
 def generate_think_tag(data: dict) -> list[dict]:
-    if "choices" not in data or len(data["choices"]) == 0:
+    try:
+        assert data["choices"][0]["delta"]["content"]
+    except (KeyError, AssertionError):
         return []
 
-    if "content" not in data["choices"][0]["delta"]:
-        return []
-
-    think_data = data.copy()
+    think_data = copy.deepcopy(data)
     think_data["choices"][0]["delta"]["content"] = "<think>"
-    think_data["finish_reason"] = None
+    think_data["choices"][0]["finish_reason"] = None
 
-    newline_data = think_data.copy()
-    newline_data["choices"][0]["delta"]["content"] = "\n"
+    newline_data = copy.deepcopy(think_data)
+    newline_data["choices"][0]["delta"]["content"] = "\n\n"
     return [think_data, newline_data]
 
 
-async def handle_streaming_response(response: httpx.Response, request_body: bytes):
-    try:
-        request_data = json.loads(request_body.decode())
-        model_name = request_data.get("model", "")
-        is_wrapped_model = model_name in global_args.wrapped_model
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        is_wrapped_model = False
+async def handle_sse(response: httpx.Response, is_wrapped_model: bool):
+    think_tag_added = False
 
-    if is_wrapped_model:
-        print(f"Processing with wrapped model: {model_name}")
-
-    async def generate_response() -> AsyncGenerator[str, None]:
-        think_tag_added = False
-
-        async for line in response.aiter_lines():
-            print(repr(line))
-            if not line.startswith("data: "):
-                yield line + "\n"
-                continue
-
-            data_content = line.removeprefix("data: ").strip()
-
-            if data_content == "[DONE]":
-                yield line + "\n"
-                continue
-
-            try:
-                data = json.loads(data_content)
-
-                if is_wrapped_model and not think_tag_added:
-                    for think_data in generate_think_tag(data):
-                        yield f"data: {json.dumps(think_data)}\n"
-                    think_tag_added = True
-
-            except Exception as e:
-                print(f"Error processing line: {line}, error: {e}")
-
+    async for line in response.aiter_lines():
+        if not line.startswith("data: "):
             yield line + "\n"
+            continue
 
-    return StreamingResponse(
-        generate_response(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-            "Access-Control-Allow-Headers": "*",
-        },
-    )
+        data_content = line.removeprefix("data: ").strip()
+
+        if data_content == "[DONE]":
+            yield line + "\n"
+            continue
+
+        try:
+            data = json.loads(data_content)
+
+            if is_wrapped_model and not think_tag_added:
+                for think_data in generate_think_tag(data):
+                    yield f"data: {json.dumps(think_data, separators=(',', ':'))}\n"
+                think_tag_added = True
+
+        except Exception as e:
+            print(f"Error processing line: {line}, error: {e}")
+
+        yield line + "\n"
+
+
+class FlexibleResponse(BaseModel):
+    status_code: int
+    headers: dict[str, str]
+    body: bytes | None = None
+    stream: bool = False
 
 
 async def proxy_request(request: Request, path: str):
@@ -158,25 +141,54 @@ async def proxy_request(request: Request, path: str):
             params=request.query_params,
         ) as response:
             if "text/event-stream" in response.headers.get("content-type", ""):
-                return await handle_streaming_response(response, body)
-            else:
-                return Response(
-                    content=await response.aread(),
+                yield FlexibleResponse(
                     status_code=response.status_code,
                     headers=dict(response.headers),
+                    stream=True,
                 )
+                if path == "chat/completions":
+                    body_json: dict = json.loads(body)
+                    is_wrapped_model = (
+                        body_json.get("model") in global_args.wrapped_model
+                    )
+                    print(f"Wrapped model detected: {body_json.get('model')}")
+                else:
+                    is_wrapped_model = False
+
+                async for chunk in handle_sse(response, is_wrapped_model):
+                    yield chunk
+            else:
+                yield FlexibleResponse(
+                    status_code=response.status_code,
+                    headers=dict(response.headers),
+                    body=await response.aread(),
+                )
+
+
+@app.get("/health")
+async def health_check():
+    return {"status": "healthy", "remote_endpoint": global_args.remote_endpoint}
 
 
 @app.api_route(
     "/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"]
 )
 async def proxy_all(request: Request, path: str):
-    return await proxy_request(request, path)
-
-
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy", "remote_endpoint": global_args.remote_endpoint}
+    results = proxy_request(request, path)
+    flexible_response = await anext(results)
+    assert isinstance(flexible_response, FlexibleResponse)
+    if flexible_response.stream:
+        return StreamingResponse(
+            results,
+            status_code=flexible_response.status_code,
+            headers=flexible_response.headers,
+        )
+    else:
+        return Response(
+            flexible_response.body,
+            status_code=flexible_response.status_code,
+            headers=flexible_response.headers,
+        )
 
 
 def main():
