@@ -3,7 +3,7 @@ from typing import AsyncGenerator, Optional
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -21,6 +21,11 @@ class Args(BaseModel):
         import argparse
 
         parser = argparse.ArgumentParser(description="Fairy R1 Wrapper")
+        parser.add_argument(
+            "--debug",
+            action="store_true",
+            help="Enable debug mode",
+        )
         parser.add_argument(
             "--host",
             type=str,
@@ -66,9 +71,23 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[list] = None
 
 
-async def handle_streaming_response(
-    response: httpx.Response, request_body: bytes
-) -> StreamingResponse:
+def generate_think_tag(data: dict) -> list[dict]:
+    if "choices" not in data or len(data["choices"]) == 0:
+        return []
+
+    if "content" not in data["choices"][0]["delta"]:
+        return []
+
+    think_data = data.copy()
+    think_data["choices"][0]["delta"]["content"] = "<think>"
+    think_data["finish_reason"] = None
+
+    newline_data = think_data.copy()
+    newline_data["choices"][0]["delta"]["content"] = "\n"
+    return [think_data, newline_data]
+
+
+async def handle_streaming_response(response: httpx.Response, request_body: bytes):
     try:
         request_data = json.loads(request_body.decode())
         model_name = request_data.get("model", "")
@@ -76,53 +95,36 @@ async def handle_streaming_response(
     except (json.JSONDecodeError, UnicodeDecodeError):
         is_wrapped_model = False
 
-    async def generate_response() -> AsyncGenerator[str, None]:
-        first_content_chunk = True
+    if is_wrapped_model:
+        print(f"Processing with wrapped model: {model_name}")
 
-        async for chunk in response.aiter_text():
-            if not chunk.strip():
-                yield chunk
+    async def generate_response() -> AsyncGenerator[str, None]:
+        think_tag_added = False
+
+        async for line in response.aiter_lines():
+            print(repr(line))
+            if not line.startswith("data: "):
+                yield line + "\n"
                 continue
 
-            lines = chunk.split("\n")
-            processed_lines = []
+            data_content = line.removeprefix("data: ").strip()
 
-            for line in lines:
-                if line.startswith("data: "):
-                    data_content = line.removeprefix("data: ").strip()
+            if data_content == "[DONE]":
+                yield line + "\n"
+                continue
 
-                    if data_content == "[DONE]":
-                        processed_lines.append(line)
-                        continue
+            try:
+                data = json.loads(data_content)
 
-                    try:
-                        data = json.loads(data_content)
+                if is_wrapped_model and not think_tag_added:
+                    for think_data in generate_think_tag(data):
+                        yield f"data: {json.dumps(think_data)}\n"
+                    think_tag_added = True
 
-                        if (
-                            is_wrapped_model
-                            and first_content_chunk
-                            and "choices" in data
-                            and data["choices"]
-                        ):
-                            choice = data["choices"][0]
-                            if "delta" in choice and "content" in choice["delta"]:
-                                content = choice["delta"]["content"]
-                                if content and content.strip():
-                                    choice["delta"]["content"] = "<think>\n" + content
-                                    first_content_chunk = False
-                            elif "message" in choice and "content" in choice["message"]:
-                                content = choice["message"]["content"]
-                                if content and content.strip():
-                                    choice["message"]["content"] = "<think>\n" + content
-                                    first_content_chunk = False
+            except Exception as e:
+                print(f"Error processing line: {line}, error: {e}")
 
-                        processed_lines.append("data: " + json.dumps(data))
-                    except json.JSONDecodeError:
-                        processed_lines.append(line)
-                else:
-                    processed_lines.append(line)
-
-            yield "\n".join(processed_lines)
+            yield line + "\n"
 
     return StreamingResponse(
         generate_response(),
@@ -137,42 +139,32 @@ async def handle_streaming_response(
     )
 
 
-async def proxy_request(request: Request, path: str) -> Response:
-    """代理请求到远程端点"""
+async def proxy_request(request: Request, path: str):
     url = f"{global_args.remote_endpoint.rstrip('/')}/{path.lstrip('/')}"
 
-    # 获取请求体
     body = await request.body()
 
-    # 构建请求头，排除一些不需要的头
+    # Remove unnecessary headers
     headers = dict(request.headers)
     headers.pop("host", None)
     headers.pop("content-length", None)
 
     async with httpx.AsyncClient() as client:
-        try:
-            response = await client.request(
-                method=request.method,
-                url=url,
-                content=body,
-                headers=headers,
-                params=request.query_params,
-                timeout=60.0,
-            )
-
-            # 对于流式响应的特殊处理
+        async with client.stream(
+            method=request.method,
+            url=url,
+            content=body,
+            headers=headers,
+            params=request.query_params,
+        ) as response:
             if "text/event-stream" in response.headers.get("content-type", ""):
                 return await handle_streaming_response(response, body)
             else:
                 return Response(
-                    content=response.content,
+                    content=await response.aread(),
                     status_code=response.status_code,
                     headers=dict(response.headers),
                 )
-        except httpx.RequestError as e:
-            raise HTTPException(
-                status_code=502, detail=f"Proxy request failed: {str(e)}"
-            )
 
 
 @app.api_route(
