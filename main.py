@@ -49,7 +49,7 @@ class Args(BaseModel):
             "--wrapped-model",
             type=str,
             nargs="+",
-            default=["fairy-r1"],
+            default=["FairyR1"],
             help="List of wrapped model names",
         )
 
@@ -151,7 +151,8 @@ async def proxy_request(request: Request, path: str):
                     is_wrapped_model = (
                         body_json.get("model") in global_args.wrapped_model
                     )
-                    print(f"Wrapped model detected: {body_json.get('model')}")
+                    if is_wrapped_model:
+                        print(f"Wrapped model detected: {body_json.get('model')}")
                 else:
                     is_wrapped_model = False
 
