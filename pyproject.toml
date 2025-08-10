@@ -10,3 +10,8 @@ dependencies = [
     "pydantic>=2.11.7",
     "uvicorn>=0.35.0",
 ]
+
+[[tool.uv.index]]
+name = "tuna"
+url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/"
+default = true
