@@ -1,7 +1,7 @@
 [project]
 name = "fairy-r1-wrapper"
 version = "0.1.0"
-description = "Fairy R1模型API包装器"
+description = "Fairy-R1 model API wrapper"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

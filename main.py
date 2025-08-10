@@ -8,7 +8,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-app = FastAPI(title="Fairy R1 Wrapper", description="Fairy R1模型API包装器")
+app = FastAPI(title="Fairy-R1 Wrapper", description="Fairy-R1 model API wrapper")
 
 
 class Args(BaseModel):
@@ -72,7 +72,18 @@ class ChatCompletionRequest(BaseModel):
     stop: Optional[list] = None
 
 
-def generate_think_tag(data: dict) -> list[dict]:
+def completion_insert_think_tag(data: dict) -> dict:
+    try:
+        data = copy.deepcopy(data)
+        content = data["choices"][0]["message"]["content"]
+        data["choices"][0]["message"]["content"] = "<think>\n\n" + content
+    except (KeyError, AssertionError):
+        pass
+
+    return data
+
+
+def stream_insert_think_tag(data: dict) -> list[dict]:
     try:
         assert data["choices"][0]["delta"]["content"]
     except (KeyError, AssertionError):
@@ -105,7 +116,7 @@ async def handle_sse(response: httpx.Response, is_wrapped_model: bool):
             data = json.loads(data_content)
 
             if is_wrapped_model and not think_tag_added:
-                for think_data in generate_think_tag(data):
+                for think_data in stream_insert_think_tag(data):
                     yield f"data: {json.dumps(think_data, separators=(',', ':'))}\n"
                 think_tag_added = True
 
@@ -146,7 +157,7 @@ async def proxy_request(request: Request, path: str):
                     headers=dict(response.headers),
                     stream=True,
                 )
-                if path == "chat/completions":
+                if path == "chat/completions" and response.status_code == 200:
                     body_json: dict = json.loads(body)
                     is_wrapped_model = (
                         body_json.get("model") in global_args.wrapped_model
@@ -159,10 +170,24 @@ async def proxy_request(request: Request, path: str):
                 async for chunk in handle_sse(response, is_wrapped_model):
                     yield chunk
             else:
+                if path == "chat/completions" and response.status_code == 200:
+                    body_json: dict = json.loads(s=body)
+                    is_wrapped_model = (
+                        body_json.get("model") in global_args.wrapped_model
+                    )
+                else:
+                    is_wrapped_model = False
+
+                response_body = await response.aread()
+                if is_wrapped_model:
+                    print(f"Wrapped model detected: {body_json.get('model')}")
+                    response_dict = json.loads(response_body)
+                    response_dict = completion_insert_think_tag(response_dict)
+                    response_body = json.dumps(response_dict, separators=(",", ":"))
                 yield FlexibleResponse(
                     status_code=response.status_code,
                     headers=dict(response.headers),
-                    body=await response.aread(),
+                    body=response_body,
                 )
 
 
