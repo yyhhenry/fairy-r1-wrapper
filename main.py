@@ -162,10 +162,11 @@ async def proxy_request(request: Request, path: str):
                     is_wrapped_model = (
                         body_json.get("model") in global_args.wrapped_model
                     )
-                    if is_wrapped_model:
-                        print(f"Wrapped model detected: {body_json.get('model')}")
                 else:
                     is_wrapped_model = False
+
+                if is_wrapped_model:
+                    print(f"Wrapped model detected: {body_json.get('model')}")
 
                 async for chunk in handle_sse(response, is_wrapped_model):
                     yield chunk
