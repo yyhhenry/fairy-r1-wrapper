@@ -117,13 +117,13 @@ async def handle_sse(response: httpx.Response, is_wrapped_model: bool):
 
             if is_wrapped_model and not think_tag_added:
                 for think_data in stream_insert_think_tag(data):
-                    yield f"data: {json.dumps(think_data, ensure_ascii=True, separators=(',', ':'))}\n"
+                    yield f"data: {json.dumps(think_data, separators=(',', ':'))}\n"
                 think_tag_added = True
+
+            yield f"data: {json.dumps(data, separators=(',', ':'))}\n"
 
         except Exception as e:
             print(f"Error processing line: {line}, error: {e}")
-
-        yield line + "\n"
 
 
 class FlexibleResponse(BaseModel):
@@ -184,9 +184,7 @@ async def proxy_request(request: Request, path: str):
                     print(f"Wrapped model detected: {body_json.get('model')}")
                     response_dict = json.loads(response_body)
                     response_dict = completion_insert_think_tag(response_dict)
-                    response_body = json.dumps(
-                        response_dict, ensure_ascii=True, separators=(",", ":")
-                    )
+                    response_body = json.dumps(response_dict, separators=(",", ":"))
                 yield FlexibleResponse(
                     status_code=response.status_code,
                     headers=dict(response.headers),
