@@ -117,7 +117,7 @@ async def handle_sse(response: httpx.Response, is_wrapped_model: bool):
 
             if is_wrapped_model and not think_tag_added:
                 for think_data in stream_insert_think_tag(data):
-                    yield f"data: {json.dumps(think_data, separators=(',', ':'))}\n"
+                    yield f"data: {json.dumps(think_data, separators=(',', ':'))}\n\n"
                 think_tag_added = True
 
             yield f"data: {json.dumps(data, separators=(',', ':'))}\n"
